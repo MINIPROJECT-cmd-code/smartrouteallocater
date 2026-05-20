@@ -41,6 +41,19 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
+button,
+select,
+.steps li,
+.stats-grid article,
+.mini-metrics article {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
 svg {
   width: 22px;
   height: 22px;
@@ -136,6 +149,13 @@ svg {
   padding: 11px;
 }
 
+.mini-metrics article:hover,
+.stats-grid article:hover {
+  border-color: rgba(26, 115, 232, 0.34);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.14);
+  transform: translateY(-2px);
+}
+
 .mini-metrics strong {
   display: block;
   font-size: 0.98rem;
@@ -204,6 +224,28 @@ svg {
   align-items: center;
 }
 
+.select-shell::after {
+  content: "";
+  position: absolute;
+  right: 16px;
+  width: 9px;
+  height: 9px;
+  pointer-events: none;
+  border-right: 2px solid #64748b;
+  border-bottom: 2px solid #64748b;
+  transform: translateY(-3px) rotate(45deg);
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.select-shell:hover::after,
+.select-shell:focus-within::after {
+  border-color: var(--blue);
+}
+
+.select-shell:focus-within::after {
+  transform: translateY(1px) rotate(225deg);
+}
+
 .pin {
   position: absolute;
   left: 15px;
@@ -233,7 +275,24 @@ select,
 }
 
 select {
-  padding: 0 40px 0 38px;
+  padding: 0 46px 0 38px;
+  appearance: none;
+  cursor: pointer;
+  font-weight: 750;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+select:hover {
+  border-color: #b6c7dc;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+}
+
+select option {
+  color: #111827;
+  background: #ffffff;
+  font-weight: 650;
+  padding: 12px;
 }
 
 select:focus,
@@ -259,6 +318,7 @@ input[type="range"]:focus-visible {
 .swap-btn:hover {
   background: #d2e3fc;
   transform: rotate(180deg);
+  box-shadow: 0 12px 24px rgba(26, 115, 232, 0.18);
 }
 
 .mode-tabs {
@@ -290,6 +350,13 @@ input[type="range"]:focus-visible {
   border-radius: 8px;
   font-weight: 900;
   transition: transform 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.mode-tabs span:hover {
+  color: #174ea6;
+  background: #eef4ff;
+  border-color: #c8dcff;
+  transform: translateY(-1px);
 }
 
 .mode-tabs input:checked + span {
@@ -451,10 +518,21 @@ input[type="range"] {
   font-weight: 900;
 }
 
+.nav-actions button:not(:disabled):hover {
+  border-color: #aecbfa;
+  box-shadow: 0 12px 24px rgba(26, 115, 232, 0.14);
+  transform: translateY(-1px);
+}
+
 .nav-actions button:first-child {
   color: white;
   background: #188038;
   border-color: #188038;
+}
+
+.nav-actions button:first-child:not(:disabled):hover {
+  background: #137333;
+  box-shadow: 0 14px 28px rgba(24, 128, 56, 0.22);
 }
 
 .nav-actions button:disabled {
@@ -483,6 +561,12 @@ input[type="range"] {
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.steps li:hover {
+  border-color: #c8dcff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.1);
+  transform: translateX(3px);
 }
 
 .steps li.is-current {
@@ -567,6 +651,16 @@ input[type="range"] {
   box-shadow: none;
 }
 
+.top-search:hover {
+  border-color: #c8dcff;
+  box-shadow: 0 22px 54px rgba(15, 23, 42, 0.22);
+}
+
+.top-search:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 4px rgba(26, 115, 232, 0.13), var(--shadow);
+}
+
 .map-tools {
   position: absolute;
   top: 18px;
@@ -591,6 +685,8 @@ input[type="range"] {
 
 .map-tools button:hover {
   transform: translateY(-1px);
+  border-color: #c8dcff;
+  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.18);
 }
 
 .map-tools button.is-active {
@@ -612,6 +708,13 @@ input[type="range"] {
   border-radius: 8px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(14px);
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.route-chip:hover {
+  border-color: #c8dcff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22);
+  transform: translateY(-2px);
 }
 
 .navigation-card {
@@ -707,6 +810,11 @@ input[type="range"] {
   font-weight: 900;
 }
 
+.nav-meta button:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: translateY(-1px);
+}
+
 .route-chip > span {
   flex: 0 0 auto;
   width: 11px;
@@ -740,6 +848,12 @@ input[type="range"] {
   background: #f8fafc;
   border: 1px solid var(--line);
   border-radius: 8px;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.chip-stats div:hover {
+  background: #ffffff;
+  border-color: #c8dcff;
 }
 
 .chip-stats dt {
@@ -766,6 +880,12 @@ input[type="range"] {
   border: 3px solid white;
   border-radius: 999px;
   box-shadow: 0 10px 22px rgba(15, 23, 42, 0.28);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.leaflet-marker-icon:hover .city-marker {
+  transform: scale(1.18);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.34);
 }
 
 .city-marker::after {
@@ -875,6 +995,20 @@ input[type="range"] {
 .satellite-mode .mini-metrics article,
 .satellite-mode .map-tools button {
   background: rgba(255, 255, 255, 0.9);
+}
+
+@media (hover: none) {
+  .mini-metrics article:hover,
+  .stats-grid article:hover,
+  .steps li:hover,
+  .route-chip:hover,
+  .top-search:hover,
+  .map-tools button:hover,
+  .nav-actions button:not(:disabled):hover,
+  .nav-meta button:hover,
+  .leaflet-marker-icon:hover .city-marker {
+    transform: none;
+  }
 }
 
 @media (max-width: 940px) {
