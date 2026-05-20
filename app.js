@@ -96,7 +96,8 @@ const state = {
   trafficVisible: true,
   satelliteVisible: false,
   navigationActive: false,
-  navigationStep: 0
+  navigationStep: 0,
+  routeRequestId: 0
 };
 
 let map;
@@ -109,6 +110,7 @@ let currentLegLayer;
 let markerLayer;
 let navMarker;
 let streetTileErrors = 0;
+const geometryCache = new Map();
 
 const sourceSelect = document.querySelector("#source");
 const destinationSelect = document.querySelector("#destination");
@@ -117,7 +119,11 @@ const trafficValue = document.querySelector("#trafficValue");
 
 document.addEventListener("DOMContentLoaded", () => {
   fillCitySelects();
-  createMap();
+  if (window.L) {
+    createMap();
+  } else {
+    createFallbackMap();
+  }
   bindControls();
   updateRoute();
 });
@@ -207,6 +213,10 @@ function bindControls() {
   document.querySelector("#trafficBtn").classList.add("is-active");
 
   document.querySelector("#satelliteBtn").addEventListener("click", (event) => {
+    if (!map) {
+      setMapStatus("Offline map active");
+      return;
+    }
     state.satelliteVisible = !state.satelliteVisible;
     event.currentTarget.classList.toggle("is-active", state.satelliteVisible);
     document.body.classList.toggle("satellite-mode", state.satelliteVisible);
@@ -238,7 +248,7 @@ function bindControls() {
   document.querySelector("#citySearch").addEventListener("input", (event) => {
     const query = event.target.value.trim().toLowerCase();
     const match = cities.find((city) => city.name.toLowerCase().includes(query));
-    if (match && query.length > 1) {
+    if (match && query.length > 1 && map) {
       map.flyTo([match.lat, match.lng], 8, { duration: 0.5 });
     }
   });
@@ -253,7 +263,8 @@ function buildGraph() {
   return result;
 }
 
-function updateRoute(shouldFit = true) {
+async function updateRoute(shouldFit = true) {
+  const requestId = ++state.routeRequestId;
   stopNavigation(false);
   state.source = sourceSelect.value;
   state.destination = destinationSelect.value;
@@ -265,6 +276,26 @@ function updateRoute(shouldFit = true) {
   }
 
   state.route = findPath(state.source, state.destination);
+  state.route.geometry = routeCurveCoordinates(state.route.path, 0.18);
+  state.route.segmentGeometries = state.route.path.slice(0, -1).map((cityId, index) => {
+    return curvedPath(cityById.get(cityId), cityById.get(state.route.path[index + 1]), 0.18);
+  });
+  state.route.mapMode = "Estimated route";
+  setMapStatus("Building road route...");
+  drawMap();
+  renderSummary();
+  renderNavigation();
+
+  if (shouldFit) {
+    fitRoute();
+  }
+
+  await enhanceRouteGeometry(state.route, requestId);
+
+  if (requestId !== state.routeRequestId) {
+    return;
+  }
+
   drawMap();
   renderSummary();
   renderNavigation();
@@ -356,6 +387,11 @@ function summarizePath(path, pathRoads) {
 }
 
 function drawMap() {
+  if (!map) {
+    drawFallbackMap();
+    return;
+  }
+
   networkLayer.clearLayers();
   routeLayer.clearLayers();
   currentLegLayer.clearLayers();
@@ -380,11 +416,11 @@ function drawMap() {
   });
 
   if (state.route) {
-    const coords = routeCurveCoordinates(state.route.path, 0.18);
+    const coords = state.route.geometry?.length ? state.route.geometry : routeCurveCoordinates(state.route.path, 0.18);
 
     L.polyline(coords, {
       color: "#ffffff",
-      weight: 14,
+      weight: state.route.mapMode === "Road route" ? 16 : 14,
       opacity: 0.92,
       lineCap: "round",
       lineJoin: "round"
@@ -392,7 +428,7 @@ function drawMap() {
 
     L.polyline(coords, {
       color: "#1a73e8",
-      weight: 7,
+      weight: state.route.mapMode === "Road route" ? 8 : 7,
       opacity: 0.96,
       lineCap: "round",
       lineJoin: "round"
@@ -406,7 +442,7 @@ function drawMap() {
       lineCap: "round"
     }).addTo(routeLayer);
 
-    drawRouteArrows(state.route.path, routeLayer, "route-arrow");
+    drawRouteArrows(state.route, routeLayer, "route-arrow");
 
     if (state.navigationActive) {
       drawCurrentNavigationLeg();
@@ -456,7 +492,7 @@ function drawCurrentNavigationLeg() {
   }).addTo(currentLegLayer);
 
   if (nextCity && currentCity.id !== nextCity.id) {
-    const legPath = curvedPath(currentCity, nextCity, 0.18);
+    const legPath = route.segmentGeometries?.[step] || curvedPath(currentCity, nextCity, 0.18);
     L.polyline(legPath, {
       color: "#ffffff",
       weight: 15,
@@ -473,8 +509,103 @@ function drawCurrentNavigationLeg() {
       lineJoin: "round"
     }).addTo(currentLegLayer);
 
-    addArrowMarker(currentCity, nextCity, currentLegLayer, "nav-arrow");
+    addArrowForCoordinates(legPath, currentLegLayer, "nav-arrow");
   }
+}
+
+async function enhanceRouteGeometry(route, requestId) {
+  if (!route || route.path.length < 2) {
+    return;
+  }
+
+  try {
+    const segmentGeometries = await Promise.all(route.path.slice(0, -1).map((cityId, index) => {
+      const from = cityById.get(cityId);
+      const to = cityById.get(route.path[index + 1]);
+      return fetchRoadGeometry(from, to);
+    }));
+
+    if (requestId !== state.routeRequestId) {
+      return;
+    }
+
+    const realSegments = segmentGeometries.filter((segment) => segment.source === "road").length;
+    route.segmentGeometries = segmentGeometries.map((segment) => segment.coords);
+    route.geometry = flattenSegments(route.segmentGeometries);
+    route.mapMode = realSegments === segmentGeometries.length ? "Road route" : "Hybrid route";
+    setMapStatus(route.mapMode === "Road route" ? "Road route loaded" : "Estimated backup active");
+  } catch (error) {
+    route.mapMode = "Estimated route";
+    setMapStatus("Estimated route active");
+  }
+}
+
+async function fetchRoadGeometry(from, to) {
+  const cacheKey = `${from.id}-${to.id}`;
+  const reverseKey = `${to.id}-${from.id}`;
+
+  if (geometryCache.has(cacheKey)) {
+    return geometryCache.get(cacheKey);
+  }
+
+  if (geometryCache.has(reverseKey)) {
+    const reversed = {
+      source: geometryCache.get(reverseKey).source,
+      coords: [...geometryCache.get(reverseKey).coords].reverse()
+    };
+    geometryCache.set(cacheKey, reversed);
+    return reversed;
+  }
+
+  const fallback = {
+    source: "estimated",
+    coords: curvedPath(from, to, 0.18)
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5200);
+  const coordinates = `${from.lng},${from.lat};${to.lng},${to.lat}`;
+  const url = `https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=full&geometries=geojson`;
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      geometryCache.set(cacheKey, fallback);
+      return fallback;
+    }
+
+    const data = await response.json();
+    const route = data.routes?.[0];
+
+    if (!route?.geometry?.coordinates?.length) {
+      geometryCache.set(cacheKey, fallback);
+      return fallback;
+    }
+
+    const roadGeometry = {
+      source: "road",
+      coords: route.geometry.coordinates.map(([lng, lat]) => [lat, lng])
+    };
+    geometryCache.set(cacheKey, roadGeometry);
+    return roadGeometry;
+  } catch (error) {
+    geometryCache.set(cacheKey, fallback);
+    return fallback;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function flattenSegments(segments) {
+  const coords = [];
+  segments.forEach((segment, index) => {
+    const copy = [...segment];
+    if (index > 0) {
+      copy.shift();
+    }
+    coords.push(...copy);
+  });
+  return coords;
 }
 
 function routeCurveCoordinates(path, bend) {
@@ -517,12 +648,40 @@ function curvedPath(from, to, bend = 0.12) {
   return points;
 }
 
-function drawRouteArrows(path, layer, className) {
-  for (let index = 0; index < path.length - 1; index += 1) {
-    const from = cityById.get(path[index]);
-    const to = cityById.get(path[index + 1]);
+function drawRouteArrows(route, layer, className) {
+  if (route.segmentGeometries?.length) {
+    route.segmentGeometries.forEach((segment) => addArrowForCoordinates(segment, layer, className));
+    return;
+  }
+
+  for (let index = 0; index < route.path.length - 1; index += 1) {
+    const from = cityById.get(route.path[index]);
+    const to = cityById.get(route.path[index + 1]);
     addArrowMarker(from, to, layer, className);
   }
+}
+
+function addArrowForCoordinates(coords, layer, className) {
+  if (!coords || coords.length < 2) {
+    return;
+  }
+
+  const midIndex = Math.max(1, Math.floor(coords.length / 2));
+  const fromPoint = coords[midIndex - 1];
+  const toPoint = coords[midIndex];
+  const from = { lat: fromPoint[0], lng: fromPoint[1] };
+  const to = { lat: toPoint[0], lng: toPoint[1] };
+  const angle = bearing(from, to);
+
+  L.marker(toPoint, {
+    interactive: false,
+    icon: L.divIcon({
+      className: "",
+      html: `<span class="${className}" style="transform: rotate(${angle}deg)"></span>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14]
+    })
+  }).addTo(layer);
 }
 
 function addArrowMarker(from, to, layer, className) {
@@ -571,14 +730,14 @@ function renderSummary() {
   document.querySelector("#costStat").textContent = `Rs ${Math.round(route.fuelCost + route.toll)}`;
   document.querySelector("#modeBadge").textContent = modeLabel();
   document.querySelector("#chipMode").textContent = modeLabel();
-  document.querySelector("#chipTraffic").textContent = trafficLabel(route.traffic);
+  document.querySelector("#chipTraffic").textContent = route.mapMode || trafficLabel(route.traffic);
 
   const confidence = Math.max(62, Math.round(96 - route.traffic * 28 - state.traffic * 0.08));
   document.querySelector("#confidenceText").textContent = confidence >= 82 ? "High" : confidence >= 70 ? "Good" : "Moderate";
   document.querySelector("#confidenceBar").style.width = `${confidence}%`;
 
   document.querySelector(".route-chip p").textContent =
-    `${modeLabel()} route: ${Math.round(route.distance)} km with ${trafficLabel(route.traffic)} traffic.`;
+    `${modeLabel()} path with ${route.mapMode || "Estimated route"} drawing and ${trafficLabel(route.traffic)} traffic.`;
 
   document.querySelector("#steps").innerHTML = route.path.map((cityId, index) => {
     const city = cityById.get(cityId);
@@ -703,7 +862,7 @@ function renderNavigation() {
 }
 
 function moveMapToNavigationStep() {
-  if (!state.route) {
+  if (!state.route || !map) {
     return;
   }
   const city = cityById.get(state.route.path[state.navigationStep]);
@@ -715,12 +874,19 @@ function fitRoute() {
     return;
   }
 
-  const bounds = L.latLngBounds(state.route.path.map((id) => {
-    const city = cityById.get(id);
-    return [city.lat, city.lng];
-  }));
+  if (!map) {
+    drawFallbackMap();
+    return;
+  }
 
-  map.fitBounds(bounds, { padding: [70, 70], maxZoom: 7 });
+  const bounds = L.latLngBounds(state.route.geometry?.length
+    ? state.route.geometry
+    : state.route.path.map((id) => {
+      const city = cityById.get(id);
+      return [city.lat, city.lng];
+    }));
+
+  map.fitBounds(bounds, { padding: [80, 80], maxZoom: 8 });
 }
 
 function formatMinutes(value) {
@@ -753,4 +919,109 @@ function modeLabel() {
     return "Balanced";
   }
   return "Shortest";
+}
+
+function setMapStatus(message) {
+  const status = document.querySelector("#mapStatus strong");
+  if (status) {
+    status.textContent = message;
+  }
+}
+
+function createFallbackMap() {
+  const mapElement = document.querySelector("#map");
+  mapElement.classList.add("fallback-map");
+  mapElement.innerHTML = "";
+  setMapStatus("Offline map active");
+}
+
+function drawFallbackMap() {
+  const mapElement = document.querySelector("#map");
+  if (!mapElement) {
+    return;
+  }
+
+  const width = Math.max(760, mapElement.clientWidth || 900);
+  const height = Math.max(620, mapElement.clientHeight || 720);
+  const projectedCities = new Map(cities.map((city) => [city.id, projectCity(city, width, height)]));
+  const routeIds = new Set(state.route?.path || []);
+  const routeSegments = state.route?.path?.slice(0, -1).map((cityId, index) => {
+    return [projectedCities.get(cityId), projectedCities.get(state.route.path[index + 1])];
+  }) || [];
+
+  const roadLines = roads.map((road) => {
+    const from = projectedCities.get(road.from);
+    const to = projectedCities.get(road.to);
+    const color = road.traffic > 0.6 ? "#d93025" : road.traffic > 0.45 ? "#f9ab00" : "#188038";
+    return `<path d="${svgCurve(from, to, 0.16)}" stroke="${color}" stroke-width="2.5" opacity="0.28" fill="none" stroke-linecap="round"/>`;
+  }).join("");
+
+  const routeLines = routeSegments.map(([from, to], index) => {
+    const active = state.navigationActive && index === state.navigationStep;
+    const color = active ? "#f9ab00" : "#1a73e8";
+    const widthValue = active ? 8 : 6;
+    return `
+      <path d="${svgCurve(from, to, 0.22)}" stroke="#ffffff" stroke-width="${widthValue + 7}" opacity="0.95" fill="none" stroke-linecap="round"/>
+      <path d="${svgCurve(from, to, 0.22)}" stroke="${color}" stroke-width="${widthValue}" fill="none" stroke-linecap="round"/>
+    `;
+  }).join("");
+
+  const markerNodes = cities.map((city) => {
+    const point = projectedCities.get(city.id);
+    const terminal = city.id === state.source || city.id === state.destination;
+    const stop = routeIds.has(city.id);
+    const fill = terminal ? "#d93025" : stop ? "#7e57c2" : "#1a73e8";
+    return `
+      <g class="fallback-city">
+        <circle cx="${point.x}" cy="${point.y}" r="${terminal ? 9 : 7}" fill="${fill}" stroke="#ffffff" stroke-width="3"/>
+        <text x="${point.x + 10}" y="${point.y - 9}">${city.name}</text>
+      </g>
+    `;
+  }).join("");
+
+  const navPoint = state.navigationActive && state.route
+    ? projectedCities.get(state.route.path[state.navigationStep])
+    : null;
+  const navMarkerNode = navPoint
+    ? `<circle class="fallback-nav-marker" cx="${navPoint.x}" cy="${navPoint.y}" r="13" fill="#f9ab00" stroke="#ffffff" stroke-width="4"/>`
+    : "";
+
+  mapElement.innerHTML = `
+    <svg class="fallback-map-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Fallback smart route map">
+      <defs>
+        <linearGradient id="fallbackWater" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stop-color="#dbeafe"/>
+          <stop offset="1" stop-color="#ecfeff"/>
+        </linearGradient>
+      </defs>
+      <rect width="${width}" height="${height}" fill="url(#fallbackWater)"/>
+      <path d="M${width * 0.46} ${height * 0.04} C${width * 0.18} ${height * 0.18}, ${width * 0.17} ${height * 0.58}, ${width * 0.38} ${height * 0.95} C${width * 0.52} ${height * 0.86}, ${width * 0.78} ${height * 0.7}, ${width * 0.84} ${height * 0.42} C${width * 0.72} ${height * 0.2}, ${width * 0.61} ${height * 0.08}, ${width * 0.46} ${height * 0.04}Z" fill="#f8fafc" stroke="#cbd5e1" stroke-width="3"/>
+      ${roadLines}
+      ${routeLines}
+      ${markerNodes}
+      ${navMarkerNode}
+    </svg>
+  `;
+}
+
+function projectCity(city, width, height) {
+  const minLat = 8;
+  const maxLat = 33;
+  const minLng = 68;
+  const maxLng = 90;
+  const x = 80 + ((city.lng - minLng) / (maxLng - minLng)) * (width - 160);
+  const y = 52 + ((maxLat - city.lat) / (maxLat - minLat)) * (height - 104);
+  return { x, y };
+}
+
+function svgCurve(from, to, bend = 0.16) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+  const curve = Math.min(80, distance * bend);
+  const normalX = -dy / distance;
+  const normalY = dx / distance;
+  const cx = (from.x + to.x) / 2 + normalX * curve;
+  const cy = (from.y + to.y) / 2 + normalY * curve;
+  return `M${from.x.toFixed(1)} ${from.y.toFixed(1)} Q${cx.toFixed(1)} ${cy.toFixed(1)} ${to.x.toFixed(1)} ${to.y.toFixed(1)}`;
 }
