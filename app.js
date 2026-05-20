@@ -101,12 +101,14 @@ const state = {
 
 let map;
 let streetLayer;
+let fallbackStreetLayer;
 let satelliteLayer;
 let networkLayer;
 let routeLayer;
 let currentLegLayer;
 let markerLayer;
 let navMarker;
+let streetTileErrors = 0;
 
 const sourceSelect = document.querySelector("#source");
 const destinationSelect = document.querySelector("#destination");
@@ -135,10 +137,16 @@ function createMap() {
     preferCanvas: true
   }).setView([22.7, 79.4], 5);
 
-  streetLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  streetLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    subdomains: "abcd",
+    maxZoom: 18,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+  }).addTo(map);
+
+  fallbackStreetLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
     attribution: "&copy; OpenStreetMap contributors"
-  }).addTo(map);
+  });
 
   satelliteLayer = L.tileLayer(
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -152,6 +160,17 @@ function createMap() {
   routeLayer = L.layerGroup().addTo(map);
   currentLegLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
+
+  streetLayer.on("tileerror", () => {
+    streetTileErrors += 1;
+    if (streetTileErrors >= 3 && !state.satelliteVisible && !map.hasLayer(fallbackStreetLayer)) {
+      fallbackStreetLayer.addTo(map);
+    }
+  });
+
+  map.whenReady(() => {
+    setTimeout(() => map.invalidateSize(), 100);
+  });
 }
 
 function bindControls() {
@@ -193,11 +212,21 @@ function bindControls() {
     document.body.classList.toggle("satellite-mode", state.satelliteVisible);
 
     if (state.satelliteVisible) {
-      map.removeLayer(streetLayer);
+      if (map.hasLayer(streetLayer)) {
+        map.removeLayer(streetLayer);
+      }
+      if (map.hasLayer(fallbackStreetLayer)) {
+        map.removeLayer(fallbackStreetLayer);
+      }
       satelliteLayer.addTo(map);
     } else {
-      map.removeLayer(satelliteLayer);
+      if (map.hasLayer(satelliteLayer)) {
+        map.removeLayer(satelliteLayer);
+      }
       streetLayer.addTo(map);
+      if (streetTileErrors >= 3) {
+        fallbackStreetLayer.addTo(map);
+      }
     }
   });
 
@@ -340,36 +369,44 @@ function drawMap() {
     const from = cityById.get(road.from);
     const to = cityById.get(road.to);
     const color = road.traffic > 0.6 ? "#ef4444" : road.traffic > 0.45 ? "#f59e0b" : "#65a30d";
+    const roadPath = curvedPath(from, to, 0.08);
 
-    L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
+    L.polyline(roadPath, {
       color,
       weight: state.trafficVisible ? 4 : 2,
-      opacity: state.trafficVisible ? 0.38 : 0.18,
+      opacity: state.trafficVisible ? 0.32 : 0.14,
       dashArray: state.trafficVisible ? null : "8 10"
     }).addTo(networkLayer);
   });
 
   if (state.route) {
-    const coords = state.route.path.map((id) => {
-      const city = cityById.get(id);
-      return [city.lat, city.lng];
-    });
+    const coords = routeCurveCoordinates(state.route.path, 0.18);
 
     L.polyline(coords, {
-      color: "#2563eb",
-      weight: 12,
-      opacity: 0.18,
+      color: "#ffffff",
+      weight: 14,
+      opacity: 0.92,
       lineCap: "round",
       lineJoin: "round"
     }).addTo(routeLayer);
 
     L.polyline(coords, {
-      color: "#2563eb",
-      weight: 5,
+      color: "#1a73e8",
+      weight: 7,
       opacity: 0.96,
       lineCap: "round",
       lineJoin: "round"
     }).addTo(routeLayer);
+
+    L.polyline(coords, {
+      color: "#7db3ff",
+      weight: 3,
+      opacity: 0.9,
+      dashArray: "1 16",
+      lineCap: "round"
+    }).addTo(routeLayer);
+
+    drawRouteArrows(state.route.path, routeLayer, "route-arrow");
 
     if (state.navigationActive) {
       drawCurrentNavigationLeg();
@@ -419,14 +456,106 @@ function drawCurrentNavigationLeg() {
   }).addTo(currentLegLayer);
 
   if (nextCity && currentCity.id !== nextCity.id) {
-    L.polyline([[currentCity.lat, currentCity.lng], [nextCity.lat, nextCity.lng]], {
+    const legPath = curvedPath(currentCity, nextCity, 0.18);
+    L.polyline(legPath, {
+      color: "#ffffff",
+      weight: 15,
+      opacity: 0.95,
+      lineCap: "round",
+      lineJoin: "round"
+    }).addTo(currentLegLayer);
+
+    L.polyline(legPath, {
       color: "#f9ab00",
       weight: 9,
       opacity: 0.95,
       lineCap: "round",
       lineJoin: "round"
     }).addTo(currentLegLayer);
+
+    addArrowMarker(currentCity, nextCity, currentLegLayer, "nav-arrow");
   }
+}
+
+function routeCurveCoordinates(path, bend) {
+  const coords = [];
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const from = cityById.get(path[index]);
+    const to = cityById.get(path[index + 1]);
+    const segment = curvedPath(from, to, bend);
+    if (index > 0) {
+      segment.shift();
+    }
+    coords.push(...segment);
+  }
+  return coords;
+}
+
+function curvedPath(from, to, bend = 0.12) {
+  const points = [];
+  const lat1 = from.lat;
+  const lng1 = from.lng;
+  const lat2 = to.lat;
+  const lng2 = to.lng;
+  const dx = lng2 - lng1;
+  const dy = lat2 - lat1;
+  const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+  const curve = Math.min(2.4, distance * bend);
+  const normalX = -dy / distance;
+  const normalY = dx / distance;
+  const midpointLat = (lat1 + lat2) / 2 + normalY * curve;
+  const midpointLng = (lng1 + lng2) / 2 + normalX * curve;
+
+  for (let i = 0; i <= 28; i += 1) {
+    const t = i / 28;
+    const oneMinus = 1 - t;
+    const lat = oneMinus * oneMinus * lat1 + 2 * oneMinus * t * midpointLat + t * t * lat2;
+    const lng = oneMinus * oneMinus * lng1 + 2 * oneMinus * t * midpointLng + t * t * lng2;
+    points.push([lat, lng]);
+  }
+
+  return points;
+}
+
+function drawRouteArrows(path, layer, className) {
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const from = cityById.get(path[index]);
+    const to = cityById.get(path[index + 1]);
+    addArrowMarker(from, to, layer, className);
+  }
+}
+
+function addArrowMarker(from, to, layer, className) {
+  const midLat = (from.lat + to.lat) / 2;
+  const midLng = (from.lng + to.lng) / 2;
+  const angle = bearing(from, to);
+
+  L.marker([midLat, midLng], {
+    interactive: false,
+    icon: L.divIcon({
+      className: "",
+      html: `<span class="${className}" style="transform: rotate(${angle}deg)"></span>`,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14]
+    })
+  }).addTo(layer);
+}
+
+function bearing(from, to) {
+  const lat1 = toRadians(from.lat);
+  const lat2 = toRadians(to.lat);
+  const deltaLng = toRadians(to.lng - from.lng);
+  const y = Math.sin(deltaLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+  return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+}
+
+function toRadians(value) {
+  return value * Math.PI / 180;
+}
+
+function toDegrees(value) {
+  return value * 180 / Math.PI;
 }
 
 function renderSummary() {
